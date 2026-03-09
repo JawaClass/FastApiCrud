@@ -1,0 +1,16 @@
+{
+
+  
+  "python.analysis.importFormat": "absolute",
+  "python.analysis.extraPaths": ["${workspaceFolder}/src"],
+  "python.analysis.autoSearchPaths": false,
+ 
+  // This is the key: tell VS Code to use the full path from the project root
+  "python.analysis.importFormat": "absolute",
+  "python.analysis.autoImportCompletions": false,
+  
+  // This tells Pylance to prefer "src.package" over relative paths
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingImports": "error"
+  }
+}
