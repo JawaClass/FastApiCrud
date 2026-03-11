@@ -1,4 +1,4 @@
-from typing import Any, Callable, Generic, Sequence, cast
+from typing import Any, Callable, Generic, Literal, Sequence, TypeAlias, TypeVar, cast
 from src.service.types import TModel, TCreate, TUpdate, TResponse, TID, TFilter, TContext
 from fastapi import HTTPException, Response, params
 from src.service.crud_service import CrudService
@@ -7,28 +7,22 @@ from fastapi.routing import APIRouter
 from dataclasses import dataclass
 from typing import Self  # Python 3.11+
 from fastapi import status
-from pydantic import BaseModel
 
-
-class FilterString(BaseModel):
-    pass
-
-
-class SortingString(BaseModel):
-    pass
+T_DEPENDS = TypeVar("T_DEPENDS")
 
 
 @dataclass
-class UrlParamDependency:
-    type_: type[Any]
-    depends_: Callable[..., Any] | None = None
+class UrlParamDependency(Generic[T_DEPENDS]):
+    type_: type[T_DEPENDS]
+    depends_: Callable[..., T_DEPENDS] | None = None
 
 
-@dataclass
-class FilterContext:
-    url_filter: Any | None = None
-    url_sorting: Any | None = None
-    url_pagination: Any | None = None
+F = TypeVar("F", bound=Callable[..., Any])
+
+EndpointDecoators: TypeAlias = dict[
+    Literal["GET_ALL", "GET_BY_ID", "POST", "PUT", "DELETE_BY_ID", "HEAD", "EXISTS_BY_ID"],
+    Callable[..., Any],
+]
 
 
 @dataclass
@@ -44,41 +38,82 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
         context_resolver: Callable[[], TContext],
         prefix: str,
         response_cls: type[TResponse],
+        endpoint_decorator: EndpointDecoators | None = None,
     ) -> None:
         self.service = service
         self.context_resolver = context_resolver
         self.prefix = prefix
         self.response_cls = response_cls
         self.router = APIRouter(prefix=self.prefix)
+        self.endpoint_decorator = endpoint_decorator or {}
 
     def with_all(
         self,
         create_cls: type[TCreate],
         id_cls: type[TID],
         update_cls: type[TUpdate],
-        filter_by_dep: UrlParamDependency | None = None,
-        sort_by_dep: UrlParamDependency | None = None,
-        pagination_dep: UrlParamDependency | None = None,
-        filter_factory: Callable[[FilterContext], TFilter] | None = None,
+        extra_dependencies: Sequence[params.Depends] | None = None,
+        filter_params: UrlParamDependency[T_DEPENDS] | None = None,
+        filter_factory: Callable[[T_DEPENDS], TFilter] | None = None,
+        endpoint_decorators: EndpointDecoators | None = None,
     ) -> Self:
+        """
+        Registers all CRUD endpoints for this router.
+
+        Args:
+            create_cls: Schema used for POST request body.
+                Can be a Pydantic model (parsed from JSON body), a dataclass,
+                or any callable FastAPI can resolve as a dependency.
+            id_cls: Type of the resource ID (e.g. int, UUID).
+            update_cls: Pydantic schema used for PUT request body.
+            extra_dependencies: FastAPI dependencies applied to all endpoints (e.g. auth).
+            filter_params: URL query param dependency for GET_ALL filtering.
+            filter_factory: Converts filter params into a filter object passed to the service.
+            endpoint_decorators: Optional decorators per endpoint type.
+                Supported keys: GET_ALL, GET_BY_ID, POST, PUT, DELETE, EXISTS_BY_ID.
+            Useful for caching GET endpoints, e.g. {"GET_BY_ID": cache(expire=60)}.
+        """
+        endpoint_decorators = endpoint_decorators or {}
         return (
-            self.with_get_by_id(id_cls=id_cls)
-            .with_delete_by_id(id_cls=id_cls)
-            .with_create(create_cls=create_cls)
-            .with_get_all(
-                filter_dependency=filter_by_dep,
-                sort_dependency=sort_by_dep,
-                filter_factory=filter_factory,
-                pagination_dependency=pagination_dep,
+            self.with_get_by_id(
+                id_cls=id_cls,
+                extra_dependencies=extra_dependencies,
+                endpoint_decorator=endpoint_decorators.get("GET_BY_ID"),
             )
-            .with_put(id_cls=id_cls, update_cls=update_cls)
-            .with_exists_by_id(id_cls=id_cls)
+            .with_delete_by_id(
+                id_cls=id_cls,
+                extra_dependencies=extra_dependencies,
+                endpoint_decorator=endpoint_decorators.get("DELETE_BY_ID"),
+            )
+            .with_create(
+                create_cls=create_cls,
+                extra_dependencies=extra_dependencies,
+                endpoint_decorator=endpoint_decorators.get("POST"),
+            )
+            .with_get_all(
+                filter_dependency=filter_params,
+                filter_factory=filter_factory,
+                extra_dependencies=extra_dependencies,
+                endpoint_decorator=endpoint_decorators.get("GET_ALL"),
+            )
+            .with_put(
+                id_cls=id_cls,
+                update_cls=update_cls,
+                extra_dependencies=extra_dependencies,
+                endpoint_decorator=endpoint_decorators.get("PUT"),
+            )
+            .with_exists_by_id(
+                id_cls=id_cls,
+                extra_dependencies=extra_dependencies,
+                endpoint_decorator=endpoint_decorators.get("EXISTS_BY_ID"),
+            )
         )
 
     def with_get_by_id(
         self,
         id_cls: type[TID],
         extra_dependencies: Sequence[params.Depends] | None = None,
+        endpoint_decorator: Callable[[F], F] | None = None,
         **kwargs: Any,
     ) -> Self:
 
@@ -87,10 +122,13 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
             id: id_cls = Path(),  # type: ignore
             context: TContext = Depends(self.context_resolver),
         ):
-            # return {"ok": "aa"}
-            print("with_get_by_id::endpoint. id=", id, type(id))  # type: ignore
 
             return self.get_by_id_endpoint(id, context, request=request)  # type: ignore
+
+        endpoint_decorator = endpoint_decorator or self.endpoint_decorator.get("GET_BY_ID")
+
+        if endpoint_decorator is not None:
+            endpoint = endpoint_decorator(endpoint)  # type: ignore
 
         dependencies: Sequence[params.Depends] = []
 
@@ -100,7 +138,7 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
         self.router.add_api_route(
             path="/{id}",
             methods=["GET"],
-            response_model=self.response_cls | None,
+            response_model=self.response_cls,
             endpoint=endpoint,  # type: ignore
             dependencies=dependencies,
             **kwargs,
@@ -111,6 +149,7 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
         self,
         id_cls: type[TID],
         extra_dependencies: Sequence[params.Depends] | None = None,
+        endpoint_decorator: Callable[[F], F] | None = None,
         **kwargs: Any,
     ) -> Self:
 
@@ -120,6 +159,11 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
             context: TContext = Depends(self.context_resolver),
         ):
             return self.delete_by_id_endpoint(id, context, request=request)  # type: ignore
+
+        endpoint_decorator = endpoint_decorator or self.endpoint_decorator.get("DELETE_BY_ID")
+
+        if endpoint_decorator is not None:
+            endpoint = endpoint_decorator(endpoint)  # type: ignore
 
         dependencies: Sequence[params.Depends] = []
 
@@ -140,6 +184,7 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
         self,
         create_cls: type[TCreate],
         extra_dependencies: Sequence[params.Depends] | None = None,
+        endpoint_decorator: Callable[[F], F] | None = None,
         **kwargs: Any,
     ) -> Self:
 
@@ -150,6 +195,11 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
         ):
             create_data_ = cast(TCreate, create_data)
             return self.create_endpoint(create_data_, context, request=request)
+
+        endpoint_decorator = endpoint_decorator or self.endpoint_decorator.get("POST")
+
+        if endpoint_decorator is not None:
+            endpoint = endpoint_decorator(endpoint)  # type: ignore
 
         dependencies: Sequence[params.Depends] = []
 
@@ -171,6 +221,7 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
         id_cls: type[TID],
         update_cls: type[TUpdate],
         extra_dependencies: Sequence[params.Depends] | None = None,
+        endpoint_decorator: Callable[[F], F] | None = None,
         **kwargs: Any,
     ) -> Self:
 
@@ -183,6 +234,11 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
             id_ = cast(TID, id)
             update_data_ = cast(TUpdate, update_data)
             return self.put_endpoint(id_, update_data_, context, request=request)
+
+        endpoint_decorator = endpoint_decorator or self.endpoint_decorator.get("PUT")
+
+        if endpoint_decorator is not None:
+            endpoint = endpoint_decorator(endpoint)  # type: ignore
 
         dependencies: Sequence[params.Depends] = []
 
@@ -201,15 +257,16 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
 
     def with_get_all(
         self,
-        filter_dependency: UrlParamDependency | None = None,
-        sort_dependency: UrlParamDependency | None = None,
-        pagination_dependency: UrlParamDependency | None = None,
-        filter_factory: Callable[[FilterContext], TFilter] | None = None,
+        filter_dependency: UrlParamDependency[T_DEPENDS] | None = None,
+        filter_factory: Callable[[Any], TFilter] | None = None,
         extra_dependencies: Sequence[params.Depends] | None = None,
+        endpoint_decorator: Callable[[F], F] | None = None,
         **kwargs: Any,
     ) -> Self:
 
-        def reolve_optional_depends(dep: UrlParamDependency | None) -> Callable[..., Any] | None:
+        def reolve_optional_depends(
+            dep: UrlParamDependency[T_DEPENDS] | None,
+        ) -> Callable[..., Any] | None:
             if dep is None:
                 return None
             if dep.depends_ is None:
@@ -218,36 +275,23 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
 
         # handle optional dependency type
         filter_dependency_type_ = filter_dependency.type_ if filter_dependency else lambda: None
-        sort_dependency_type_ = sort_dependency.type_ if sort_dependency else lambda: None
-        pagination_dependency_type_ = (
-            pagination_dependency.type_ if pagination_dependency else lambda: None
-        )
+        filter_dependency_call = reolve_optional_depends(filter_dependency)
 
         async def endpoint(
             request: Request,
             context: TContext = Depends(dependency=self.context_resolver),
-            url_filter: filter_dependency_type_ = Depends(  # type: ignore
-                dependency=reolve_optional_depends(filter_dependency)  # type: ignore
-            ),  # type: ignore
-            url_sorting: sort_dependency_type_ = Depends(reolve_optional_depends(sort_dependency)),  # type: ignore
-            url_pagination: pagination_dependency_type_ = Depends(  # type: ignore
-                dependency=reolve_optional_depends(pagination_dependency)  # type: ignore
+            filter_params: filter_dependency_type_ = Depends(  # type: ignore
+                dependency=filter_dependency_call  # type: ignore
             ),  # type: ignore
         ):
 
-            filters = (
-                filter_factory(
-                    FilterContext(
-                        url_filter=cast(Any, url_filter),
-                        url_pagination=cast(Any, url_pagination),
-                        url_sorting=cast(Any, url_sorting),
-                    )
-                )
-                if filter_factory
-                else None
-            )
+            filters = filter_factory(filter_params) if filter_factory else None
 
             return self.get_all_endpoint(context, request=request, filters=filters)
+
+        endpoint_decorator = endpoint_decorator or self.endpoint_decorator.get("GET_ALL")
+        if endpoint_decorator is not None:
+            endpoint = endpoint_decorator(endpoint)  # type: ignore
 
         dependencies: Sequence[params.Depends] = []
 
@@ -257,7 +301,9 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
         self.router.add_api_route(
             path="/",
             methods=["GET"],
-            response_model=list[self.response_cls],  # TODO: allow any response...
+            response_model=list[
+                self.response_cls
+            ],  # TODO: allow custom response. we need to support more than just lists of ...
             endpoint=endpoint,  # type: ignore
             dependencies=dependencies,
             **kwargs,
@@ -268,6 +314,7 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
         self,
         id_cls: type[TID],
         extra_dependencies: Sequence[params.Depends] | None = None,
+        endpoint_decorator: Callable[[F], F] | None = None,
         **kwargs: Any,
     ) -> Self:
 
@@ -281,6 +328,10 @@ class ApiBuilder(Generic[TModel, TCreate, TUpdate, TResponse, TID, TFilter, TCon
                 return Response(status_code=status.HTTP_200_OK)
             else:
                 return Response(status_code=status.HTTP_404_NOT_FOUND)
+
+        endpoint_decorator = endpoint_decorator or self.endpoint_decorator.get("EXISTS_BY_ID")
+        if endpoint_decorator is not None:
+            endpoint = endpoint_decorator(endpoint)  # type: ignore
 
         dependencies: Sequence[params.Depends] = []
 

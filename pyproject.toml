@@ -12,8 +12,10 @@ dependencies = [
     "fastapi-filters>=0.3.2",
     "fastapi[standard]>=0.135.1",
     "httpx>=0.28.1",
+    "ipython>=9.11.0",
     "pydantic>=2.12.5",
     "pymongo>=4.16.0",
+    "ruff>=0.15.2",
     "sqlalchemy>=2.0",
 ]
 

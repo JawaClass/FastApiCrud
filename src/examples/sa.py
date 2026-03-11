@@ -1,15 +1,15 @@
-from fastapi import FastAPI
+print("aaaaaa")
+
+from fastapi import Depends, FastAPI
 from pydantic import BaseModel
-from src.repository.crud_filter import SaFilter
 from src.api.api import UrlParamDependency
 from src.repository.sqlalchemy_crud_repository import SqlAlchemyCrudContext
-from typing import Any, Callable, List, Optional
+from typing import List, Optional
 from sqlalchemy import String, ForeignKey, Integer, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 from fastapi_filters import (
     FilterField,
     FilterSet,
-    SortingValues,
     create_filters_from_model,
     create_sorting_from_model,
 )
@@ -22,7 +22,7 @@ from src.api.filter_factories.fastapi_filters_factory import (
     SaFilterSortingValues,
 )
 
-
+print("heyyyyyyyyyyyyyyyyyyyyyyyyy")
 # 1. Define a Base class for all models
 class Base(DeclarativeBase):
     pass
@@ -61,11 +61,9 @@ class Pokemon(Base):
     # Relationship back to the Trainer
     owner: Mapped[Optional["Trainer"]] = relationship(back_populates="pokemons")
 
-
 eng = create_engine("sqlite:///:memory:")
 Base.metadata.create_all(eng)
 new_session = sessionmaker(bind=eng)
-
 
 class TrainerWithoutId(BaseModel):
     name: str
@@ -87,35 +85,39 @@ class TrainerResponse(TrainerWithoutId):
 class TrainerFilters(FilterSet):
     name: FilterField[str]
 
+ 
 
-def prepare_filter_dependency(
-    dependency: Callable[..., Any], filter_factory: Callable[[Any], SaFilter[Any]]
-):
+filtering_call = create_filters_from_model(TrainerResponse)
+sorting_call = create_sorting_from_model(TrainerResponse)
+class MyCustomUrlFilter:
+    
+    def __init__(
+        self,
+        pagination: SaFilterOffsetPagination = Depends(SaFilterOffsetPagination),
+        filtering=Depends(filtering_call), # type: ignore
+        sorting=Depends(sorting_call) # type: ignore
+    ):
+        self.pagination = pagination
+        self.filtering = filtering
+        self.sorting = sorting
+
+def build_filter_factory(url_params: MyCustomUrlFilter):
     """
-    Example:
-        filter_resolver = create_filters_from_model(TrainerResponse)
-        prepare_filter_dependency(filter_resolver)
-    """
-    print("prepare_filter_dependency...", dependency)
-    import inspect
+    resolve the dependencies and create SaFilters from it...
+    """  
+    assert isinstance(url_params, MyCustomUrlFilter) 
 
-    sig = inspect.signature(dependency)
+    sa_filter = SaFilterFilterSet(filters=url_params.filtering)
+    sa_sort = SaFilterSortingValues(sorting=url_params.sorting)
+    sa_page = url_params.pagination
 
-    async def my_filter(*args: Any, **kwargs: Any) -> SaFilter[Any]:
-        resolved_dependency = await dependency(*args, **kwargs)
-        filter_ = filter_factory(resolved_dependency)
-        assert isinstance(filter_, SaFilter)
-        return filter_
+    return FastApiFiltersSortOffsetPagingSaFilter(
+        filterring=sa_filter,
+        sorting=sa_sort,
+        pagination=sa_page
+    )
 
-    # 3. Apply the signature hijack
-    my_filter.__signature__ = sig  # type: ignore
-    # Optional: ensure metadata like __name__ matches for cleaner debugging
-    my_filter.__name__ = dependency.__name__  # type: ignore
-
-    return my_filter
-
-
-x = build_sa_api(
+my_api = build_sa_api(
     prefix="/trainer",
     model_cls=Trainer,
     create_cls=TrainerCreate,
@@ -123,32 +125,13 @@ x = build_sa_api(
     update_cls=TrainerUpdate,
     session_maker=new_session,
     id_column=Trainer.id,
-    id_cls=int,
-    filter_factory=lambda ctx: FastApiFiltersSortOffsetPagingSaFilter(
-        filterring=ctx.url_filter, sorting=ctx.url_sorting, pagination=ctx.url_pagination
-    ),
-    filter_dependency=UrlParamDependency(
-        type_=SaFilterFilterSet,
-        depends_=prepare_filter_dependency(
-            dependency=create_filters_from_model(TrainerResponse),
-            filter_factory=lambda resolved_filter: SaFilterFilterSet(filters=resolved_filter),
-        ),
-    ),
-    sorting_dependency=UrlParamDependency(
-        type_=SortingValues,
-        depends_=prepare_filter_dependency(
-            dependency=create_sorting_from_model(TrainerResponse),
-            filter_factory=lambda resolved_filter: SaFilterSortingValues(sorting=resolved_filter),
-        ),
-    ),
-    pagination_dependency=UrlParamDependency(
-        type_=SaFilterOffsetPagination,
-    ),
+    filter_factory=build_filter_factory,
+    filter_params=UrlParamDependency(MyCustomUrlFilter, MyCustomUrlFilter)
 )
 
 ctx = SqlAlchemyCrudContext(new_session())
 
-x.service.create_all(
+my_api.service.create_all(
     ctx,
     [
         TrainerCreate(name="Ash Ketchum", region="Kanto"),
@@ -164,7 +147,7 @@ x.service.create_all(
     ],
 )
 
-# uv run -m fastapi dev --entrypoint src.api.test_api_sqlalchemy:app
+# uv run -m fastapi dev --entrypoint src.examples.sa:app
 app = FastAPI()
 
-app.include_router(x.fastapi_router)
+app.include_router(my_api.fastapi_router) 

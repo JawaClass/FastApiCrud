@@ -7,6 +7,7 @@ from fastapi_filters.ext.sqlalchemy import apply_filters, apply_sorting
 from src.repository.crud_filter import SaFilter
 from sqlalchemy import Select
 from .base import FilterSortPagingSaFilter
+from sqlalchemy.orm import InstrumentedAttribute
 
 
 @dataclass
@@ -32,6 +33,34 @@ class SaFilterOffsetPagination(SaFilter[Any]):
 
     def apply(self, target: Select[tuple[Any]]) -> Select[tuple[Any]]:
         return target.limit(self.limit).offset(self.offset)
+
+
+def SaCursorPagination(id_column: InstrumentedAttribute[Any]):
+    """
+    Factory function because id_column is required to perform pagination.
+    That way we can use our class as FastAPI Dependeny
+    """
+
+    @dataclass
+    class SaCursorPagination(SaFilter[Any]):
+        cursor: int | None = field(default=None)
+        limit: int | None = field(default=None)
+
+        def apply(self, target: Select[tuple[Any]]) -> Select[tuple[Any]]:
+            if self.cursor is not None:
+                target = target.where(id_column > self.cursor)
+            return target.limit(self.limit)
+
+    return SaCursorPagination
+
+
+@dataclass
+class SaPagePagination(SaFilter[Any]):
+    page: int = field(default=1)
+    page_size: int = field(default=20)
+
+    def apply(self, target: Select[tuple[Any]]) -> Select[tuple[Any]]:
+        return target.limit(self.page_size).offset((self.page - 1) * self.page_size)
 
 
 # for automatic type checking at instantiaton time
